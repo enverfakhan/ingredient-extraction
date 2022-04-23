@@ -109,7 +109,7 @@ def readcsvfile(filename):
     data = []
     cnt = 0
     for recipe, ingrs in samples:
-        if cnt > 10:
+        if cnt > 100:
             break
         label_map = {k.lower(): 'ING' for ingr in ingrs for k in ingr.split(' ')}
         steps = recipe.split('**')
@@ -158,27 +158,58 @@ class DataProcessor:
     @classmethod
     def _read_tsv(cls, input_file):
         """Reads a tab separated value file."""
-        # return readfile(input_file)
+        return readfile(input_file)
+
+    @classmethod
+    def _read_csv(cls, input_file):
+        """Reads a tab separated value file."""
         return readcsvfile(input_file)
 
 
 class NerProcessor(DataProcessor):
     """Processor for the CoNLL-2003 data set."""
 
+    def __init__(self):
+        self.train = None
+        self.dev = None
+        self.test = None
+
+    def create_sets(self, data_dir):
+        lines = self._read_csv(os.path.join(data_dir, "recipes.csv"))
+        random.seed(42)
+        eval_indices = set(random.choices(range(len(lines)), k=int(0.15 * len(lines))))
+        eval_lines = []
+        train_lines = []
+        for i, l in enumerate(lines):
+            if i in eval_indices:
+                eval_lines.append(l)
+            else:
+                train_lines.append(l)
+        train_examples = self._create_examples(train_lines, "train")
+        eval_examples = self._create_examples(eval_lines, "dev")
+        self.train = train_examples
+        self.dev = eval_examples
+
     def get_train_examples(self, data_dir):
         """See base class."""
-        # return self._create_examples(self._read_tsv(os.path.join(data_dir, "train.txt")), "train")
-        return self._create_examples(self._read_tsv(os.path.join(data_dir, "recipes.csv")), "train")
+        if self.train is None:
+            self.create_sets(data_dir)
+
+        return self.train
 
     def get_dev_examples(self, data_dir):
         """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "recipes.csv")), "dev")
+        if self.dev is None:
+            self.create_sets(data_dir)
+
+        return self.dev
 
     def get_test_examples(self, data_dir):
         """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "test.txt")), "test")
+        if self.dev is None:
+            self.create_sets(data_dir)
+
+        return self.dev
 
     def get_labels(self):
         # return ["O", "B-MISC", "I-MISC",  "B-PER", "I-PER", "B-ORG", "I-ORG", "B-LOC", "I-LOC", "[CLS]", "[SEP]"]
