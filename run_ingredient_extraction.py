@@ -36,7 +36,7 @@ tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
 try:
     import wandb
-    has_wandb = False
+    has_wandb = True
 except:
     has_wandb = False
 
