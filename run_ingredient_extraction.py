@@ -321,11 +321,6 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
 
 
 def create_directory_name():
-    """
-    >>> x = datetime.datetime.now()
-    >>> print(x)
-    >>> 2022-04-23 20:33:21.262529
-    """
     now = datetime.datetime.now()
     now = '-'.join([str(now.year), str(now.month), str(now.day), str(now.hour), str(now.minute), str(now.second)])
     return f'output/{now}'
@@ -431,8 +426,9 @@ def main():
             gpus = [f"/gpu:{gpu}" for gpu in args.gpus.split(',')]
             strategy = tf.distribute.MirroredStrategy(devices=gpus)
     else:
-        gpu = args.gpus.split(',')[0]
-        strategy = tf.distribute.OneDeviceStrategy(device=f"/gpu:{gpu}")
+        # gpu = args.gpus.split(',')[0]
+        strategy = tf.distribute.MirroredStrategy()
+        # strategy = tf.distribute.OneDeviceStrategy(device=f"/gpu:{gpu}")
 
     train_examples = None
     optimizer = None
@@ -519,8 +515,8 @@ def main():
                 optimizer.apply_gradients(list(zip(grads, ner.trainable_variables)))
                 return cross_entropy
 
-            per_example_losses = strategy.run(step_fn,
-                                     args=(input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask))
+            per_example_losses = strategy.experimental_run_v2(step_fn, args=(input_ids, input_mask, segment_ids,
+                                                                             valid_ids, label_ids,label_mask))
             mean_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_example_losses, axis=0)
             return mean_loss
 
