@@ -113,8 +113,8 @@ def readcsvfile(filename):
     train_data = []
     cnt = 0
     for i, (recipe, ingrs) in enumerate(samples):
-        if cnt > 100:
-            break
+        # if cnt > 100:
+        #     break
         label_map = {k.lower(): 'ING' for ingr in ingrs for k in ingr.split(' ')}
         steps = recipe.split('**')
         for step in steps:
