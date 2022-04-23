@@ -137,7 +137,8 @@ def readcsvfile(filename):
                     word = lemmatizer.lemmatize(word)
                     label = label_map.get(word.lower(), 'N-ING')
                     label_seq.append(label)
-                new_sentence[-1] = new_sentence[-1] + '.'
+                if len(new_sentence) > 0:
+                    new_sentence[-1] = new_sentence[-1] + '.'
                 if i in eval_indices:
                     eval_data.append((new_sentence, label_seq))
                 else:
