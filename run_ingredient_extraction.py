@@ -6,6 +6,7 @@ import json
 import logging
 import math
 import os
+import datetime
 import random
 import string
 import shutil
@@ -35,7 +36,7 @@ tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 
 try:
     import wandb
-    has_wandb = True
+    has_wandb = False
 except:
     has_wandb = False
 
@@ -282,8 +283,17 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                           label_mask=label_mask))
     return features
 
+
 def create_directory_name():
-    return 'output/first_try'
+    """
+    >>> x = datetime.datetime.now()
+    >>> print(x)
+    >>> 2022-04-23 20:33:21.262529
+    """
+    now = datetime.datetime.now()
+    now = '-'.join([str(now.year), str(now.month), str(now.day), str(now.hour), str(now.minute), str(now.second)])
+    return f'output/{now}'
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -336,7 +346,7 @@ def main():
                         type=float,
                         help="The initial learning rate for Adam.")
     parser.add_argument("--num_train_epochs",
-                        default=1,
+                        default=3,
                         type=int,
                         help="Total number of training epochs to perform.")
     parser.add_argument("--warmup_proportion",
@@ -450,7 +460,8 @@ def main():
         # dist_dataset = strategy.experimental_distribute_dataset(batched_train_data)
         dist_dataset = batched_train_data
 
-        loss_metric = tf.keras.metrics.Mean()
+        loss_train_metric = tf.keras.metrics.Mean()
+        loss_eval_metric = tf.keras.metrics.Mean()
 
         epoch_bar = master_bar(range(args.num_train_epochs))
         pb_max_len = math.ceil(
@@ -477,107 +488,122 @@ def main():
             mean_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_example_losses, axis=0)
             return mean_loss
 
+        # copy vocab to output_dir
+        shutil.copyfile(os.path.join(args.bert_model, "vocab.txt"), os.path.join(args.output_dir, "vocab.txt"))
+        # copy bert config to output_dir
+        shutil.copyfile(os.path.join(args.bert_model, "bert_config.json"),
+                        os.path.join(args.output_dir, "bert_config.json"))
+        # save label_map and max_seq_length of trained model
+        model_config = {"bert_model": args.bert_model, "do_lower": args.do_lower_case,
+                        "max_seq_length": args.max_seq_length, "num_labels": num_labels,
+                        "label_map": label_map}
+        json.dump(model_config, open(os.path.join(args.output_dir, "model_config.json"), "w"), indent=4)
+
         for epoch in epoch_bar:
             with strategy.scope():
                 for (input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask) in progress_bar(dist_dataset, total=pb_max_len, parent=epoch_bar):
                     loss = train_step(input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask)
-                    loss_metric(loss)
-                    epoch_bar.child.comment = f'loss : {loss_metric.result()}'
-            loss_metric.reset_states()
+                    loss_train_metric(loss)
+                    epoch_bar.child.comment = f'loss : {loss_train_metric.result()}'
 
-        # model weight save
-        ner.save_weights(os.path.join(args.output_dir,"model.h5"))
-        # copy vocab to output_dir
-        shutil.copyfile(os.path.join(args.bert_model,"vocab.txt"),os.path.join(args.output_dir,"vocab.txt"))
-        # copy bert config to output_dir
-        shutil.copyfile(os.path.join(args.bert_model,"bert_config.json"),os.path.join(args.output_dir,"bert_config.json"))
-        # save label_map and max_seq_length of trained model
-        model_config = {"bert_model":args.bert_model,"do_lower":args.do_lower_case,
-                        "max_seq_length":args.max_seq_length,"num_labels":num_labels,
-                        "label_map":label_map}
-        json.dump(model_config,open(os.path.join(args.output_dir,"model_config.json"),"w"),indent=4)
+            # model weight save
+            ner.save_weights(os.path.join(args.output_dir,f"model-{epoch}.h5"))
 
 
-    if args.do_eval:
-        # load tokenizer
-        tokenizer = FullTokenizer(os.path.join(args.output_dir, "vocab.txt"), args.do_lower_case)
-        # model build hack : fix
-        config = json.load(open(os.path.join(args.output_dir,"bert_config.json")))
-        ner = BertNer(config, tf.float32, num_labels, args.max_seq_length)
-        ids = tf.ones((1,128),dtype=tf.int32)
-        _ = ner(ids,ids,ids,ids, training=False)
-        ner.load_weights(os.path.join(args.output_dir,"model.h5"))
+            if args.do_eval:
+                # load tokenizer
+                tokenizer = FullTokenizer(os.path.join(args.output_dir, "vocab.txt"), args.do_lower_case)
+                # model build hack : fix
+                # config = json.load(open(os.path.join(args.output_dir,"bert_config.json")))
+                # ner = BertNer(config, tf.float32, num_labels, args.max_seq_length)
+                ids = tf.ones((1,128),dtype=tf.int32)
+                _ = ner(ids,ids,ids,ids, training=False)
+                # ner.load_weights(os.path.join(args.output_dir,f"model-{epoch}.h5"))
 
-        # load test or development set based on argsK
-        if args.eval_on == "dev":
-            eval_examples = processor.get_dev_examples(args.data_dir)
-        elif args.eval_on == "test":
-            eval_examples = processor.get_test_examples(args.data_dir)
+                # load test or development set based on argsK
+                if args.eval_on == "dev":
+                    eval_examples = processor.get_dev_examples(args.data_dir)
+                elif args.eval_on == "test":
+                    eval_examples = processor.get_test_examples(args.data_dir)
 
-        eval_features = convert_examples_to_features(
-            eval_examples, label_list, args.max_seq_length, tokenizer)
-        logger.info("***** Running evalution *****")
-        logger.info("  Num examples = %d", len(eval_examples))
-        logger.info("  Batch size = %d", args.eval_batch_size)
+                eval_features = convert_examples_to_features(
+                    eval_examples, label_list, args.max_seq_length, tokenizer)
+                logger.info("***** Running evalution *****")
+                logger.info("  Num examples = %d", len(eval_examples))
+                logger.info("  Batch size = %d", args.eval_batch_size)
 
-        all_input_ids = tf.data.Dataset.from_tensor_slices(
-            np.asarray([f.input_ids for f in eval_features],dtype=np.int32))
-        all_input_mask = tf.data.Dataset.from_tensor_slices(
-            np.asarray([f.input_mask for f in eval_features],dtype=np.int32))
-        all_segment_ids = tf.data.Dataset.from_tensor_slices(
-            np.asarray([f.segment_ids for f in eval_features],dtype=np.int32))
-        all_valid_ids = tf.data.Dataset.from_tensor_slices(
-            np.asarray([f.valid_ids for f in eval_features],dtype=np.int32))
+                all_input_ids_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.input_ids for f in eval_features],dtype=np.int32))
+                all_input_mask_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.input_mask for f in eval_features],dtype=np.int32))
+                all_segment_ids_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.segment_ids for f in eval_features],dtype=np.int32))
+                all_valid_ids_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.valid_ids for f in eval_features],dtype=np.int32))
 
-        all_label_ids = tf.data.Dataset.from_tensor_slices(
-            np.asarray([f.label_id for f in eval_features],dtype=np.int32))
+                all_label_ids_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.label_id for f in eval_features],dtype=np.int32))
 
-        eval_data = tf.data.Dataset.zip(
-            (all_input_ids, all_input_mask, all_segment_ids, all_valid_ids, all_label_ids))
-        batched_eval_data = eval_data.batch(args.eval_batch_size)
+                all_label_mask_eval = tf.data.Dataset.from_tensor_slices(
+                    np.asarray([f.label_mask for f in eval_features]))
 
-        loss_metric = tf.keras.metrics.Mean()
-        epoch_bar = master_bar(range(1))
-        pb_max_len = math.ceil(
-            float(len(eval_features))/float(args.eval_batch_size))
+                eval_data = tf.data.Dataset.zip(
+                    (all_input_ids_eval, all_input_mask_eval, all_segment_ids_eval, all_valid_ids_eval,
+                     all_label_ids_eval, all_label_mask_eval))
+                batched_eval_data = eval_data.batch(args.eval_batch_size)
 
-        y_true = []
-        y_pred = []
-        label_map = {i : label for i, label in enumerate(label_list,1)}
-        for epoch in epoch_bar:
-            for (input_ids, input_mask, segment_ids, valid_ids, label_ids) in progress_bar(batched_eval_data, total=pb_max_len, parent=epoch_bar):
-                    logits = ner(input_ids, input_mask,
-                                 segment_ids, valid_ids, training=False)
-                    logits = tf.argmax(logits,axis=2)
-                    for i, label in enumerate(label_ids):
-                        temp_1 = []
-                        temp_2 = []
-                        for j,m in enumerate(label):
-                            if j == 0:
-                                continue
-                            elif label_ids[i][j].numpy() == len(label_map):
-                                y_true.extend(temp_1)
-                                y_pred.extend(temp_2)
-                                break
-                            else:
-                                temp_1.append(label_map[label_ids[i][j].numpy()])
-                                temp_2.append(label_map[logits[i][j].numpy()])
-        metric_container = {}
-        report_dict = classification_report(y_true[0], y_pred[0], digits=4, output_dict=True)
-        report_dict = flatten_class_report(report_dict)
-        for metric_name, metric in report_dict.items():
-            if metric.count == 0:
-                continue
-            metric_container[metric_name] = metric.value
+                epoch_bar = master_bar(range(1))
+                pb_max_len = math.ceil(
+                    float(len(eval_features))/float(args.eval_batch_size))
 
-        wandb.log(metric_container)
+                y_true = []
+                y_pred = []
+                label_map = {i : label for i, label in enumerate(label_list,1)}
+                for epoch in epoch_bar:
+                    for (input_ids, input_mask, segment_ids, valid_ids, label_ids_orig, label_mask) in progress_bar(batched_eval_data, total=pb_max_len, parent=epoch_bar):
+                            # input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mas
+                            logits = ner(input_ids, input_mask, segment_ids, valid_ids, training=False)
+                            predictions = tf.argmax(logits, axis=2)
+                            label_mask = tf.reshape(label_mask, (-1,))
+                            logits = tf.reshape(logits, (-1, num_labels))
+                            logits_masked = tf.boolean_mask(logits, label_mask)
+                            label_ids = tf.reshape(label_ids_orig, (-1,))
+                            label_ids_masked = tf.boolean_mask(label_ids, label_mask)
+                            cross_entropy = loss_fct(label_ids_masked, logits_masked)
+                            loss_eval_metric(cross_entropy)
+                            for i, label in enumerate(label_ids_orig):
+                                temp_1 = []
+                                temp_2 = []
+                                for j,m in enumerate(label):
+                                    if j == 0:
+                                        continue
+                                    elif label_ids_orig[i][j].numpy() == len(label_map):
+                                        y_true.extend(temp_1)
+                                        y_pred.extend(temp_2)
+                                        break
+                                    else:
+                                        temp_1.append(label_map[label_ids_orig[i][j].numpy()])
+                                        temp_2.append(label_map[predictions[i][j].numpy()])
+                metric_container = {'eval_loss': float(loss_eval_metric.result().numpy()),
+                                    'train_loss': float(loss_train_metric.result().numpy())}
+                loss_train_metric.reset_states()
+                loss_eval_metric.reset_states()
+                report_dict = classification_report(y_true, y_pred, digits=4, output_dict=True)
+                report_dict = flatten_class_report(report_dict)
+                for metric_name, metric in report_dict.items():
+                    if metric.count == 0:
+                        continue
+                    metric_container[metric_name] = metric.value
+                if has_wandb:
+                    wandb.log(metric_container)
+                print(metric_container.items(), flush=True)
+                report = classification_report(y_true, y_pred, digits=4)
+                output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
+                with open(output_eval_file, "w") as writer:
+                    logger.info("***** Eval results *****")
+                    logger.info("\n%s", report)
+                    writer.write(report)
 
-        report = classification_report(y_true, y_pred, digits=4)
-        output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-        with open(output_eval_file, "w") as writer:
-            logger.info("***** Eval results *****")
-            logger.info("\n%s", report)
-            writer.write(report)
 
 if __name__ == "__main__":
     main()
