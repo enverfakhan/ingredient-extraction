@@ -40,6 +40,7 @@ try:
 except:
     has_wandb = False
 
+
 class InputExample:
     """A single training/test example for simple sequence classification."""
 
@@ -106,9 +107,12 @@ def readcsvfile(filename):
     ingredients = [d.split(',') for d in dataframe['Ingredients']]
     directions = list(dataframe['Directions'].values)
     samples = list(zip(directions, ingredients))
-    data = []
+    random.seed(42)
+    eval_indices = set(random.choices(range(len(samples)), k=int(0.15 * len(samples))))
+    eval_data = []
+    train_data = []
     cnt = 0
-    for recipe, ingrs in samples:
+    for i, (recipe, ingrs) in enumerate(samples):
         if cnt > 100:
             break
         label_map = {k.lower(): 'ING' for ingr in ingrs for k in ingr.split(' ')}
@@ -134,10 +138,13 @@ def readcsvfile(filename):
                     label = label_map.get(word.lower(), 'N-ING')
                     label_seq.append(label)
                 new_sentence[-1] = new_sentence[-1] + '.'
-                data.append((new_sentence, label_seq))
+                if i in eval_indices:
+                    eval_data.append((new_sentence, label_seq))
+                else:
+                    train_data.append((new_sentence, label_seq))
                 cnt += 1
 
-    return data
+    return train_data, eval_data
 
 
 class DataProcessor:
@@ -175,17 +182,12 @@ class NerProcessor(DataProcessor):
         self.test = None
 
     def create_sets(self, data_dir):
-        lines = self._read_csv(os.path.join(data_dir, "recipes.csv"))
-        random.seed(42)
-        eval_indices = set(random.choices(range(len(lines)), k=int(0.15 * len(lines))))
-        eval_lines = []
-        train_lines = []
-        for i, l in enumerate(lines):
-            if i in eval_indices:
-                eval_lines.append(l)
-            else:
-                train_lines.append(l)
+        train_lines, eval_lines = self._read_csv(os.path.join(data_dir, "recipes.csv"))
+        print(f"number of sentences in train set: {len(train_lines)}")
+        print(f"number of sentences in train set: {len(eval_lines)}")
+
         train_examples = self._create_examples(train_lines, "train")
+
         eval_examples = self._create_examples(eval_lines, "dev")
         self.train = train_examples
         self.dev = eval_examples
