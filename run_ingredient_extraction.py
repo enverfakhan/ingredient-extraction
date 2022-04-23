@@ -245,6 +245,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         label_mask = []
         start_position = 1
         for i, word in enumerate(textlist):
+            if i >= len(labellist):
+                continue
             token = tokenizer.tokenize(word)
             tokens.extend(token)
             label_1 = labellist[i]
