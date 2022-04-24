@@ -11,10 +11,14 @@ import random
 import string
 import shutil
 import sys
+import tqdm
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+gpus = tf.config.experimental.list_physical_devices('GPU')
+for gpu in gpus:
+  tf.config.experimental.set_memory_growth(gpu, True)
 from fastprogress import master_bar, progress_bar
 # from seqeval.metrics import classification_report
 from sklearn.metrics import classification_report
@@ -113,7 +117,8 @@ def readcsvfile(filename):
     train_data = []
     cnt = 0
     for i, (recipe, ingrs) in enumerate(samples):
-        # if cnt > 100:
+        # open below for debugging
+        # if cnt > 1000:
         #     break
         label_map = {k.lower(): 'ING' for ingr in ingrs for k in ingr.split(' ')}
         steps = recipe.split('**')
@@ -236,7 +241,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     label_map = {label: i for i, label in enumerate(label_list, 1)}
 
     features = []
-    for (ex_index, example) in enumerate(examples):
+    for (ex_index, example) in tqdm.tqdm(enumerate(examples)):
         textlist = example.text_a.split(' ')
         labellist = example.label
         tokens = []
@@ -344,7 +349,7 @@ def main():
 
     # Other parameters
     parser.add_argument("--max_seq_length",
-                        default=128,
+                        default=50,
                         type=int,
                         help="The maximum total input sequence length after WordPiece tokenization. \n"
                              "Sequences longer than this will be truncated, and sequences shorter \n"
@@ -426,9 +431,8 @@ def main():
             gpus = [f"/gpu:{gpu}" for gpu in args.gpus.split(',')]
             strategy = tf.distribute.MirroredStrategy(devices=gpus)
     else:
-        # gpu = args.gpus.split(',')[0]
-        strategy = tf.distribute.MirroredStrategy()
-        # strategy = tf.distribute.OneDeviceStrategy(device=f"/gpu:{gpu}")
+        gpu = args.gpus.split(',')[0]
+        strategy = tf.distribute.OneDeviceStrategy(device=f"/gpu:{gpu}")
 
     train_examples = None
     optimizer = None
@@ -489,8 +493,8 @@ def main():
                                                 reshuffle_each_iteration=True)
         batched_train_data = shuffled_train_data.batch(args.train_batch_size)
         # Distributed dataset
-        # dist_dataset = strategy.experimental_distribute_dataset(batched_train_data)
-        dist_dataset = batched_train_data
+        dist_dataset = strategy.experimental_distribute_dataset(batched_train_data)
+        # dist_dataset = batched_train_data
 
         loss_train_metric = tf.keras.metrics.Mean()
         loss_eval_metric = tf.keras.metrics.Mean()
@@ -503,7 +507,10 @@ def main():
             def step_fn(input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask):
 
                 with tf.GradientTape() as tape:
-                    logits = ner(input_ids, input_mask,segment_ids, valid_ids, training=True)
+                    try:
+                        logits = ner(input_ids, input_mask,segment_ids, valid_ids, training=True)
+                    except Exception as e:
+                        return None
                     label_mask = tf.reshape(label_mask,(-1,))
                     logits = tf.reshape(logits,(-1,num_labels))
                     logits_masked = tf.boolean_mask(logits,label_mask)
@@ -515,8 +522,10 @@ def main():
                 optimizer.apply_gradients(list(zip(grads, ner.trainable_variables)))
                 return cross_entropy
 
-            per_example_losses = strategy.experimental_run_v2(step_fn, args=(input_ids, input_mask, segment_ids,
-                                                                             valid_ids, label_ids,label_mask))
+            per_example_losses = strategy.run(step_fn, args=(input_ids, input_mask, segment_ids,
+                                                                              valid_ids, label_ids,label_mask))
+            if per_example_losses is None:
+                return None
             mean_loss = strategy.reduce(tf.distribute.ReduceOp.MEAN, per_example_losses, axis=0)
             return mean_loss
 
@@ -532,13 +541,17 @@ def main():
         json.dump(model_config, open(os.path.join(args.output_dir, "model_config.json"), "w"), indent=4)
 
         for epoch in epoch_bar:
+            logger.info(f"epoch number: {epoch}")
             with strategy.scope():
-                for (input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask) in progress_bar(dist_dataset, total=pb_max_len, parent=epoch_bar):
-                    loss = train_step(input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask)
-                    loss_train_metric(loss)
-                    epoch_bar.child.comment = f'loss : {loss_train_metric.result()}'
-
-            # model weight save
+               for (input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask) in progress_bar(dist_dataset, total=pb_max_len, parent=epoch_bar):
+                   print(f"the epcoh number is: {epoch}")
+                   loss = train_step(input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mask)
+                   if loss is None:
+                       continue
+                   loss_train_metric(loss)
+                   epoch_bar.child.comment = f'loss : {loss_train_metric.result()}'
+            
+            # model wight save
             ner.save_weights(os.path.join(args.output_dir,f"model-{epoch}.h5"))
 
 
@@ -548,7 +561,7 @@ def main():
                 # model build hack : fix
                 # config = json.load(open(os.path.join(args.output_dir,"bert_config.json")))
                 # ner = BertNer(config, tf.float32, num_labels, args.max_seq_length)
-                ids = tf.ones((1,128),dtype=tf.int32)
+                ids = tf.ones((1,50),dtype=tf.int32)
                 _ = ner(ids,ids,ids,ids, training=False)
                 # ner.load_weights(os.path.join(args.output_dir,f"model-{epoch}.h5"))
 
@@ -593,7 +606,6 @@ def main():
                 label_map = {i : label for i, label in enumerate(label_list,1)}
                 for epoch in epoch_bar:
                     for (input_ids, input_mask, segment_ids, valid_ids, label_ids_orig, label_mask) in progress_bar(batched_eval_data, total=pb_max_len, parent=epoch_bar):
-                            # input_ids, input_mask, segment_ids, valid_ids, label_ids,label_mas
                             logits = ner(input_ids, input_mask, segment_ids, valid_ids, training=False)
                             predictions = tf.argmax(logits, axis=2)
                             label_mask = tf.reshape(label_mask, (-1,))
@@ -631,7 +643,7 @@ def main():
                 print(metric_container.items(), flush=True)
                 report = classification_report(y_true, y_pred, digits=4)
                 output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
-                with open(output_eval_file, "w") as writer:
+                with open(output_eval_file, "a") as writer:
                     logger.info("***** Eval results *****")
                     logger.info("\n%s", report)
                     writer.write(report)
