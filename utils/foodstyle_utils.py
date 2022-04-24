@@ -1,5 +1,7 @@
 import re
-from collections import namedtuple
+import string
+from collections import namedtuple, Counter
+import tensorflow as tf
 
 ### this part is taken from https://www.exxactcorp.com/blog/Deep-Learning/text-preprocessing-methods-for-deep-learning
 
@@ -64,8 +66,98 @@ def flatten_class_report(report):
             flattened_dict_of_metrics[class_name] = value_support._make([metric_dict, 1])
             continue
         for metric, value in metric_dict.items():
-            if metric is not 'support':
+            if metric != 'support':
                 flattened_metric_name = class_name + '_' + metric
                 flattened_dict_of_metrics[flattened_metric_name] = value_support._make([value, metric_dict['support']])
     return flattened_dict_of_metrics
+
+
+def get_sentence_len_histogram(data):
+    distribution = Counter([len(sentence) for sentence in data])
+    return distribution
+
+
+def get_word_distribution(data):
+    distribution = Counter()
+    for sentence in data:
+        for word in sentence:
+            distribution.update(word)
+
+    return distribution
+
+
+def convert_logit_to_labels(logits, label_ids, label_map, input_ids, tokenizer):
+    predictions = tf.argmax(logits, axis=2)
+    y_pred = []
+    tokens = []
+    for i, label in enumerate(label_ids):
+        temp_1 = []
+        temp_2 = []
+        for j,m in enumerate(label):
+            if j == 0:
+                continue
+            token = tokenizer.convert_ids_to_tokens([input_ids[i][j].numpy()])[0]
+            pred = label_map[predictions[i][j].numpy()]
+            if token == '[PAD]':
+                y_pred.extend(temp_2[:-1])
+                tokens.extend(temp_1[:-1])
+                break
+            else:
+                temp_2.append(pred)
+                temp_1.append(token)
+    return y_pred, tokens
+
+
+def combine_phrases(result):
+    new_result = [result[0]]
+    for candid in result[1:]:
+        if candid[1] == new_result[-1][2]:
+            new_result[-1][0] = ' '.join([new_result[-1][0], candid[0]])
+            new_result[-1][2] = candid[2]
+        else:
+            new_result.append(candid)
+    return new_result
+
+
+def get_ingredients_and_positions(predictions, tokens):
+    start_position = 0
+    end_position = 0
+    new_word = False
+    result = []
+    word = ''
+    is_ingr = False
+    for i, (pred, token) in enumerate(zip(predictions, tokens)):
+        if token in string.punctuation:
+            start_position += 1
+            continue
+        is_ingr = is_ingr or pred == 'ING'
+        if token[:2] == '##':
+            end_position = end_position + len(token) -2
+            word = word + token[2:]
+            new_word = False
+        else:
+            if new_word is False:
+                if is_ingr is True:
+                    result.append([word, start_position-1, end_position])
+                start_position = end_position
+                word = ''
+                is_ingr = False
+
+            start_position += 1
+            end_position = start_position + len(token)
+            word = word + token
+            if len(tokens) >= i and tokens[i+1][:2] == '##':
+                new_word = False
+            else:
+                new_word = True
+            is_ingr = is_ingr or pred == 'ING'
+        if new_word is True:
+            if is_ingr is True:
+                result.append([word, start_position-1, end_position])
+            start_position = end_position
+            word = ''
+            is_ingr = False
+
+    result = combine_phrases(result)
+    return result
 
